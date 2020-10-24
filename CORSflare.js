@@ -1,5 +1,5 @@
 // ----------------------------------------------------------------------------------
-// CORSflare - v1.0.4
+// CORSflare - v1.0.5
 // ref.: https://github.com/Darkseal/CORSflare
 // A lightweight JavaScript CORS Reverse Proxy designed to run in a Cloudflare Worker
 // ----------------------------------------------------------------------------------
@@ -19,6 +19,15 @@ const upstream_mobile = null;
 
 // Custom pathname for the upstream website ('/' will work for most scenarios)
 const upstream_path = '/';
+
+// Set it to TRUE to allow the default upstream to be overridden with a customizable GET parameter (see `upstream_get_parameter` below), FALSE to prevent that.
+// WARNING: this feature will allow third-parties to replace this proxy's default upstream with an upstream of their choice: activate it only if you know 
+// what you're doing (see ref. below): also, it could be wise to change the default `upstream_get_parameter` with a unique string to reduce the risk of hijacks.
+// ref.: https://github.com/Darkseal/CORSflare/issues/1
+const upstream_allow_override = false;
+
+// The GET parameter that can be used to override the default upstream if `upstream_allow_override` is set to TRUE.
+const upstream_get_parameter = 'CORSflare_upstream';
 
 // An array of countries and regions that won't be able to use the proxy.
 const blocked_regions = ['CN', 'KP', 'SY', 'PK', 'CU'];
@@ -137,6 +146,7 @@ async function fetchAndApply(request) {
     let response = null;
     let url = new URL(request.url);
     let url_hostname = url.hostname;
+    let upstream_GET = (upstream_allow_override) ? url.searchParams.get(upstream_get_parameter) : null;
 
     if (https == true) {
         url.protocol = 'https:';
@@ -144,10 +154,15 @@ async function fetchAndApply(request) {
         url.protocol = 'http:';
     }
 
-    if (upstream_mobile && await is_mobile_user_agent(user_agent)) {
-        var upstream_domain = upstream_mobile;
-    } else {
-        var upstream_domain = upstream;
+    var upstream_domain = null;
+    if (upstream_GET) {
+        upstream_domain = upstream_GET;
+    }
+    else if (upstream_mobile && await is_mobile_user_agent(user_agent)) {
+        upstream_domain = upstream_mobile;
+    }
+    else {
+        upstream_domain = upstream;
     }
 
     url.host = upstream_domain;
@@ -229,9 +244,21 @@ async function fetchAndApply(request) {
 
         // Patch "location" header to handle standard 301/302/303/307/308 HTTP redirects
         if (new_response_headers.get("location")) {
-            new_response_headers.set("location", new_response_headers.get("location")
-                .replace(url.protocol + "//", "https://")
-                .replace(upstream_domain, url_hostname));
+            var location = new_response_headers.get("location");
+
+            // specific behaviour for GDrive-based redirects: see https://github.com/Darkseal/CORSflare/issues/1 for details.
+            if (upstream_allow_override && location.includes("googleusercontent.com")) {
+                var new_upstream = location.substring(8, location.indexOf("/", 8));
+                location = location + "&" + upstream_get_parameter + "=" + new_upstream;
+                new_response_headers.set("location", location
+                    .replace(url.protocol + "//", "https://")
+                    .replace(new_upstream, url_hostname));
+            }
+            else {
+                new_response_headers.set("location", location
+                    .replace(url.protocol + "//", "https://")
+                    .replace(upstream_domain, url_hostname));
+            }
         }
 
         // Patch "set-cookie" headers by forcefully apply "SameSite=None" and "Secure" directives to allow cross-domain usage
